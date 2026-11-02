@@ -41,13 +41,15 @@ namespace Lidgren.Network
 		{
 			public byte[] Data;
 			public int Length;
+			public int Messages;
 			public double DelayedUntil;
 			public NetEndPoint Target;
 
-			public DelayedPacket(byte[] data, int length, double delayedUntil, NetEndPoint target)
+			public DelayedPacket(byte[] data, int length, int messages, double delayedUntil, NetEndPoint target)
 			{
 				Data = data;
 				Length = length;
+				Messages = messages;
 				DelayedUntil = delayedUntil;
 				Target = target;
 			}
@@ -68,8 +70,6 @@ namespace Lidgren.Network
 				}
 			}
 
-			m_statistics.PacketSent(numBytes, numMessages);
-
 			// simulate latency
 			float m = m_configuration.m_minimumOneWayLatency;
 			float r = m_configuration.m_randomOneWayLatency;
@@ -77,11 +77,10 @@ namespace Lidgren.Network
 			{
 				// no latency simulation
 				// LogVerbose("Sending packet " + numBytes + " bytes");
-				bool wasSent = ActuallySendPacket(m_sendBuffer, numBytes, target, out connectionReset);
-				// TODO: handle wasSent == false?
+				SendWithBackpressure(m_sendBuffer, numBytes, target, numMessages, out connectionReset);
 
 				if (m_configuration.m_duplicates > 0.0f && m_latencyRandom.NextDouble() < m_configuration.m_duplicates)
-					ActuallySendPacket(m_sendBuffer, numBytes, target, out connectionReset); // send it again!
+					SendWithBackpressure(m_sendBuffer, numBytes, target, numMessages, out connectionReset); // send it again!
 
 				return;
 			}
@@ -96,7 +95,7 @@ namespace Lidgren.Network
 
 				// Enqueue delayed packet
 				var storage = GetStorage(numBytes);
-				DelayedPacket p = new DelayedPacket(storage, numBytes, NetTime.Now + delay, target);
+				DelayedPacket p = new DelayedPacket(storage, numBytes, numMessages, NetTime.Now + delay, target);
 
 				Buffer.BlockCopy(m_sendBuffer, 0, p.Data, 0, numBytes);
 
@@ -118,7 +117,7 @@ namespace Lidgren.Network
 				var p = m_delayedPackets[i];
 				if (now < p.DelayedUntil)
 					continue;
-				ActuallySendPacket(p.Data, p.Length, p.Target, out _);
+				SendWithBackpressure(p.Data, p.Length, p.Target, p.Messages, out _);
 
 				// Swap packet with last entry in list.
 				// This does not preserve order (we don't care) but is O(1).
@@ -140,7 +139,7 @@ namespace Lidgren.Network
 			{
 				foreach (DelayedPacket p in m_delayedPackets)
 				{
-					ActuallySendPacket(p.Data, p.Length, p.Target, out bool connectionReset);
+					SendWithBackpressure(p.Data, p.Length, p.Target, p.Messages, out _);
 					Recycle(p.Data);
 				}
 
@@ -155,6 +154,7 @@ namespace Lidgren.Network
 
 		internal bool ActuallySendPacket(byte[] data, int numBytes, NetEndPoint target, out bool connectionReset)
 		{
+			_sendWouldBlock = false;
 			var dualStack = m_configuration.DualStack && m_configuration.LocalAddress.AddressFamily == AddressFamily.InterNetworkV6;
 			connectionReset = false;
 			IPAddress? ba = default(IPAddress);
@@ -192,7 +192,10 @@ namespace Lidgren.Network
 
 				int bytesSent = NetFastSocket.SendTo(m_socket, data, 0, numBytes, SocketFlags.None, realTarget);
 				if (numBytes != bytesSent)
+				{
 					LogWarning($"Failed to send the full {numBytes}; only {bytesSent} bytes sent in packet!");
+					return false;
+				}
 
 				// LogDebug("Sent " + numBytes + " bytes");
 			}
@@ -201,7 +204,7 @@ namespace Lidgren.Network
 				if (sx.SocketErrorCode == SocketError.WouldBlock)
 				{
 					// send buffer full?
-					LogWarning("Socket threw exception; would block - send buffer full? Increase in NetPeerConfiguration");
+					WarnSendBufferFull();
 					return false;
 				}
 				if (sx.SocketErrorCode == SocketError.ConnectionReset)
@@ -211,10 +214,12 @@ namespace Lidgren.Network
 					return false;
 				}
 				LogError($"Failed to send packet: {sx}");
+				return false;
 			}
 			catch (Exception ex)
 			{
 				LogError($"Failed to send packet: {ex}");
+				return false;
 			}
 			finally
 			{
@@ -252,7 +257,7 @@ namespace Lidgren.Network
 				if (sx.SocketErrorCode == SocketError.WouldBlock)
 				{
 					// send buffer full?
-					LogWarning("Socket threw exception; would block - send buffer full? Increase in NetPeerConfiguration");
+					WarnSendBufferFull();
 					return false;
 				}
 				if (sx.SocketErrorCode == SocketError.ConnectionReset)

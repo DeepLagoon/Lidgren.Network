@@ -52,7 +52,7 @@ namespace Lidgren.Network
 		{
 			int queueLen = m_queuedSends.Count + 1;
 			int left = GetAllowedSends();
-			if (queueLen > left || (message.LengthBytes > m_connection.m_currentMTU && m_connection.m_peerConfiguration.UnreliableSizeBehaviour == NetUnreliableSizeBehaviour.DropAboveMTU))
+			if (queueLen > left || (m_connection.m_peerConfiguration.EnableSendBackpressure && queueLen > m_windowSize) || (message.LengthBytes > m_connection.m_currentMTU && m_connection.m_peerConfiguration.UnreliableSizeBehaviour == NetUnreliableSizeBehaviour.DropAboveMTU))
 			{
 				// drop message
 				return NetSendResult.Dropped;
@@ -80,7 +80,7 @@ namespace Lidgren.Network
 				return;
 
 			// queued sends
-			while (num > 0 && m_queuedSends.Count > 0)
+			while (num > 0 && m_queuedSends.Count > 0 && m_connection.m_peer.CanSendQueuedMessages)
 			{
 				if (m_queuedSends.TryDequeue(out NetOutgoingMessage? om))
 					ExecuteSend(om);

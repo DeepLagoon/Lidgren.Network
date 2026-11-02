@@ -269,6 +269,7 @@ namespace Lidgren.Network
 
 			// one final heartbeat, will send stuff and do disconnect
 			Heartbeat();
+			_pendingSends?.Clear();
 
 			NetUtility.Sleep(10);
 
@@ -362,6 +363,7 @@ namespace Lidgren.Network
 					}
 				}
 
+				_pendingSends?.Drain(now);
 				SendDelayedPackets();
 
 				// update m_executeFlushSendQueue
@@ -374,8 +376,13 @@ namespace Lidgren.Network
 				// do connection heartbeats
 				lock (m_connections)
 				{
-					for (int i = m_connections.Count - 1; i >= 0; i--)
+					// Rotate the first connection under backpressure, so a continuously busy
+					// connection cannot always consume the newly available socket capacity.
+					int i = m_configuration.EnableSendBackpressure && m_connections.Count > 0
+						? (int)(m_frameCounter % (uint)m_connections.Count) : m_connections.Count - 1;
+					for (int remaining = m_connections.Count; remaining > 0 && m_connections.Count > 0; remaining--)
 					{
+						i %= m_connections.Count;
 						var conn = m_connections[i];
 						conn.Heartbeat(now, m_frameCounter);
 						if (conn.m_status == NetConnectionStatus.Disconnected)
@@ -386,6 +393,8 @@ namespace Lidgren.Network
 							m_connections.RemoveAt(i);
 							m_connectionLookup.Remove((NetSocketAddress)conn.RemoteEndPoint);
 						}
+						if (m_connections.Count > 0)
+							i = (i + m_connections.Count - 1) % m_connections.Count;
 					}
 				}
 				m_executeFlushSendQueue = false;

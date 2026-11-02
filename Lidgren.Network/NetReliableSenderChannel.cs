@@ -50,7 +50,10 @@ namespace Lidgren.Network
 		{
 			m_receivedAcks.Clear();
 			for (int i = 0; i < m_storedMessages.Length; i++)
+			{
+				m_connection.ReliableByteWindow.Release(m_storedMessages[i].EncodedBytes);
 				m_storedMessages[i].Reset();
+			}
 			m_anyStoredResends = false;
 			m_queuedSends.Clear();
 			m_windowStart = 0;
@@ -83,8 +86,9 @@ namespace Lidgren.Network
 				m_anyStoredResends = true;
 
 				double t = storedMsg.LastSent;
-				if (t > 0 && (now - t) > m_resendDelay)
+				if (t > 0 && (now - t) > m_resendDelay && m_connection.m_peer.CanSendQueuedMessages)
 				{
+					m_connection.NoteReliableCongestion(now);
 					// deduce sequence number
 					/*
 					int startSlot = m_windowStart % m_windowSize;
@@ -114,8 +118,11 @@ namespace Lidgren.Network
 				return;
 
 			// queued sends
-			while (num > 0 && m_queuedSends.Count > 0)
+			while (num > 0 && m_queuedSends.Count > 0 && m_connection.m_peer.CanSendQueuedMessages)
 			{
+				var next = m_queuedSends.TryPeek(0);
+				if (next == null || !m_connection.CanSendReliable(next.GetEncodedSize()))
+					break;
 				if (m_queuedSends.TryDequeue(out NetOutgoingMessage? om))
 					ExecuteSend(now, om);
 				num--;
@@ -125,6 +132,8 @@ namespace Lidgren.Network
 
 		private void ExecuteSend(double now, NetOutgoingMessage message)
 		{
+			var encodedBytes = message.GetEncodedSize();
+			m_connection.ReliableByteWindow.Reserve(encodedBytes);
 			int seqNr = m_sendStart;
 			m_sendStart = (m_sendStart + 1) % NetConstants.NumSequenceNumbers;
 
@@ -141,6 +150,7 @@ namespace Lidgren.Network
 			m_storedMessages[storeIndex].Message = message;
 			m_storedMessages[storeIndex].LastSent = now;
 			m_storedMessages[storeIndex].SequenceNumber = seqNr;
+			m_storedMessages[storeIndex].EncodedBytes = encodedBytes;
 			m_anyStoredResends = true;
 
 			return;
@@ -154,6 +164,7 @@ namespace Lidgren.Network
 			resetTimeout = (srm.NumSent == 1) && (now - srm.LastSent < kThreshold);
 
 			var storedMessage = srm.Message;
+			m_connection.ReliableByteWindow.Acknowledge(srm.EncodedBytes);
 
 #if DEBUG
 			if (storedMessage == null)
@@ -272,8 +283,9 @@ namespace Lidgren.Network
 						{
 							// already resent recently
 						}
-						else
+						else if (m_connection.m_peer.CanSendQueuedMessages)
 						{
+							m_connection.NoteReliableCongestion(now);
 							m_storedMessages[slot].LastSent = now;
 							m_storedMessages[slot].NumSent++;
 							m_connection.m_statistics.MessageResent(MessageResendReason.HoleInSequence);

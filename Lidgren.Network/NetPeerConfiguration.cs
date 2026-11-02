@@ -400,6 +400,12 @@ namespace Lidgren.Network
 			set { m_autoFlushSendQueue = value; }
 		}
 
+		/// <summary>Retry brief local socket congestion and pause channel dequeueing. Disabled by default.</summary>
+		public bool EnableSendBackpressure { get; set; }
+
+		/// <summary>Maximum adaptive reliable byte window across all channels; zero disables the limit.</summary>
+		public int ReliableSendWindowBytes { get; set; } = 131072;
+
 		/// <summary>
 		/// If true, will not send acks for unreliable unordered messages. This will save bandwidth, but disable flow control and duplicate detection for this type of messages.
 		/// </summary>

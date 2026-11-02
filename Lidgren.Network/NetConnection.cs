@@ -260,13 +260,25 @@ namespace Lidgren.Network
 			//
 			if (m_peer.m_executeFlushSendQueue)
 			{
+				const int firstReliable = (int)NetMessageType.UserReliableUnordered - 1;
+				var reliableCount = m_sendChannels.Length - firstReliable;
+				var reliableOffset = _nextReliableSendChannel < firstReliable ? 0 :
+					(_nextReliableSendChannel - firstReliable + 1) % reliableCount;
 				for (int i = m_sendChannels.Length - 1; i >= 0; i--)    // Reverse order so reliable messages are sent first
 				{
-					var channel = m_sendChannels[i];
+					// Keep reliable traffic ahead of unreliable traffic, but rotate within
+					// the reliable group so the aggregate byte window cannot starve a channel.
+					var index = m_peerConfiguration.EnableSendBackpressure && i >= firstReliable
+						? firstReliable + (i - firstReliable + reliableOffset) % reliableCount
+						: i;
+					var channel = m_sendChannels[index];
 					NetException.Assert(m_sendBufferWritePtr < 1 || m_sendBufferNumMessages > 0);
 					if (channel != null)
 					{
+						var queuedBefore = channel.QueuedSendsCount;
 						channel.SendQueuedMessages(now);
+						if (m_peerConfiguration.EnableSendBackpressure && index >= firstReliable && channel.QueuedSendsCount < queuedBefore)
+							_nextReliableSendChannel = index == firstReliable ? m_sendChannels.Length - 1 : index - 1;
 						if (channel.NeedToSendMessages())
 							m_peer.m_needFlushSendQueue = true; // failed to send all queued sends; likely a full window - need to try again
 					}
